@@ -1,0 +1,285 @@
+"""
+Generador de archivos Excel usando Pandas
+Solo muestra los datos calculados por hours_calculator
+"""
+
+import os
+import pandas as pd
+from datetime import datetime
+from typing import Dict
+from config.default_config import DEFAULT_CONFIG
+import re 
+
+def get_field(info, field_name):
+        """Busca un campo en info['fields'] por nombre y devuelve el value."""
+        for f in info.get('fields', []):
+            if str(f.get('name', '')).strip().upper() == field_name.strip().upper():
+                return f.get('value')
+        return None
+
+def get_segmentation(info, group_name):
+        """Busca en info['segmentations'] por group y devuelve el item."""
+        for s in info.get('segmentations', []):
+            if str(s.get('group', '')).strip().upper() == group_name.strip().upper():
+                return s.get('item')
+        return None
+class ExcelReportGenerator:
+    def __init__(self):
+        self.output_dir = os.path.expanduser(DEFAULT_CONFIG['output_directory'])
+        self.filename_format = DEFAULT_CONFIG['filename_format']
+        # Flag para controlar si las horas se muestran en decimales o como tiempo Excel (hh:mm)
+        self.usar_decimales = DEFAULT_CONFIG.get('usar_decimales_en_excel', False)
+
+    # -------------------- Helpers --------------------
+
+
+    def hours_to_excel_time(self, hours: float):
+        """
+        Devuelve las horas en el formato configurado.
+        Si mostrar_ceros_como_guion=True, los 0.00 u 00:00 se muestran como '-'
+        """
+        try:
+            value = float(hours) if hours else 0.0
+
+            # Si el valor es 0 y está activada la opción visual
+            if value == 0 and DEFAULT_CONFIG.get("mostrar_ceros_como_guion", False):
+                return "-"  
+
+            if self.usar_decimales:
+                return round(value, 2)
+            return round(value / 24.0, 10)
+        except Exception:
+            return "-"
+
+
+    def _only_hhmm(self, value) -> str:
+        """Devuelve 'HH:MM' si lo encuentra dentro de value; si no, ''."""
+        if not value:
+            return ""
+        m = re.search(r'([01]\d|2[0-3]):[0-5]\d', str(value))
+        return m.group(0) if m else ""
+
+    # -------------------- Generación principal --------------------
+    def generate_report(self, processed_data: Dict, start_date: str, end_date: str, output_filename: str = None) -> str:
+        """Genera el reporte Excel usando pandas"""
+
+        summary_data = self._prepare_summary_data(processed_data)
+        daily_data = self._prepare_daily_data(processed_data)
+
+        if not output_filename:
+            output_filename = self.filename_format.format(
+                start_date=start_date.replace('-', ''), end_date=end_date.replace('-', '')
+            )
+
+        os.makedirs(self.output_dir, exist_ok=True)
+        filepath = os.path.join(self.output_dir, output_filename)
+
+        with pd.ExcelWriter(filepath, engine='xlsxwriter') as writer:
+            # Hoja Resumen
+            summary_df = pd.DataFrame(summary_data)
+            summary_df.to_excel(writer, sheet_name='Resumen Consolidado', index=False, startrow=3)
+            self._format_summary_sheet(writer, summary_df, start_date, end_date)
+
+            # Hoja Detalle Diario
+            daily_df = pd.DataFrame(daily_data)
+            daily_df.to_excel(writer, sheet_name='Detalle Diario', index=False, startrow=3)
+            self._format_daily_sheet(writer, daily_df, start_date, end_date)
+
+            # Hoja Configuración
+
+        print(f"✅ Reporte Excel generado: {filepath}")
+        return filepath
+
+    # -------------------- Preparación de datos --------------------
+    def _prepare_summary_data(self, processed_data: Dict) -> list:
+        """Prepara datos para la hoja de resumen (horas convertidas según configuración)"""
+        summary_rows = []
+
+        for emp in processed_data.values():
+            info = emp['employee_info']
+            totals = emp['totals']
+
+
+            row = {
+                'ID Empleado': info.get('employeeInternalId', ''),
+                'Nombre': info.get('firstName', ''),
+                'Apellido': info.get('lastName', ''),
+                'Total Horas': self.hours_to_excel_time(totals.get('total_hours_worked', 0.0)),
+                'Horas Regulares': self.hours_to_excel_time(totals.get('total_regular_hours', 0.0)),
+                'Horas Extra 50%': self.hours_to_excel_time(totals.get('total_extra_hours_50', 0.0)),
+                'Horas Extra 100%': self.hours_to_excel_time(totals.get('total_extra_hours_100', 0.0)),
+                'Horas Nocturnas': self.hours_to_excel_time(totals.get('total_night_hours', 0.0)),
+                'Horas Feriado': self.hours_to_excel_time(totals.get('total_holiday_hours', 0.0)),
+                'Horas Feriado Nocturnas': self.hours_to_excel_time(totals.get('total_holiday_night_hours', 0.0)),
+                #'Total Tardanzas': self.hours_to_excel_time(totals.get('total_tardanza_horas', 0.0)),
+                #'Total Retiros Anticipados': self.hours_to_excel_time(totals.get('total_retiro_anticipado_horas', 0.0)),
+                'Horas Extra Diurnas': self.hours_to_excel_time(totals.get('total_extra_day_hours', 0.0)),
+                'Horas Extra Nocturnas': self.hours_to_excel_time(totals.get('total_extra_night_hours', 0.0)),
+                'Horas Extra 50% Nocturnas': self.hours_to_excel_time(totals.get('total_extra_night_hours_50', 0.0)),
+                'Horas Extra 100% Nocturnas': self.hours_to_excel_time(totals.get('total_extra_night_hours_100', 0.0)),
+            }
+            summary_rows.append(row)
+
+        return summary_rows
+
+    def _prepare_daily_data(self, processed_data: Dict) -> list:
+        """Prepara datos para la hoja de detalle diario"""
+        daily_rows = []
+
+        for emp in processed_data.values():
+            info = emp['employee_info']
+
+            legajo = get_field(info, "Legajo")
+            puesto = get_field(info, "Puesto")
+            jornada = get_segmentation(info, "Jornada Laboral")
+            sucursal = get_segmentation(info, "Sucursales")
+
+            print(
+                f"Legajo/DNI: {legajo} | "
+                f"Puesto: {puesto} | "
+                f"Sucursal: {sucursal}", 
+                f"Jornada: {jornada}", 
+            )
+
+            for d in emp['daily_data']:
+                observations = []
+                if d.get('is_holiday'):
+                    observations.append(f"Feriado: {d.get('holiday_name') or 'N/A'}")
+                if d.get('has_time_off'):
+                    observations.append(f"Licencia: {d.get('time_off_name') or 'N/A'}")
+                if d.get('has_absence'):
+                    observations.append("AUSENCIA SIN AVISO")
+
+                row = {
+                    'ID': info.get('employeeInternalId', ''),
+                    'Apellido, Nombre': f"{info.get('lastName', '')}, {info.get('firstName', '')}",
+                    
+                    'Legajo': f"{legajo}",
+                    'Puesto': f"{puesto}",
+                    'Sucursal': f"{sucursal}",
+                    'Jornada': f"{jornada}",
+
+                    'Fecha': f"{d.get('date', '')}",
+                    'dia': f"{d.get('day_of_week', '')}",
+                    'Horario obligatorio': d.get('time_range'),
+                    'Fichadas': f"{self._only_hhmm(d.get('shift_start', ''))} - {self._only_hhmm(d.get('shift_end', ''))}",
+                    'Observaciones': ', '.join(observations) if observations else '',
+                    
+                    
+                    'Horas Trabajadas': self.hours_to_excel_time(d.get('hours_worked', 0.0)),
+                    'Horas Regulares': self.hours_to_excel_time(d.get('regular_hours', 0.0)),
+                                        'Horas extra': self.hours_to_excel_time(d.get('extra_hours', 0.0)),
+
+                    'Horas Nocturnas': self.hours_to_excel_time(d.get('night_hours', 0.0)),
+
+
+                    #'Horas Extra Diurnas': self.hours_to_excel_time(d.get('extra_hours_day', 0.0)),
+                    #'Horas Extra Nocturnas': self.hours_to_excel_time(d.get('extra_hours_night', 0.0)),
+                    'Horas Extra 50% Nocturnas': self.hours_to_excel_time(d.get('extra_night_hours_50', 0.0)),
+                    'Horas Extra 50%': self.hours_to_excel_time(d.get('extra_hours_50', 0.0)),
+                    
+                    'Horas Extra 100% Nocturnas': self.hours_to_excel_time(d.get('extra_night_hours_100', 0.0)),
+                    'Horas Extra 100%': self.hours_to_excel_time(d.get('extra_hours_100', 0.0)),
+                    #'Horas Extra 150%': self.hours_to_excel_time(d.get('extra_hours_150', 0.0)),
+                    'Horas Feriado': self.hours_to_excel_time(d.get('holiday_hours', 0.0)),
+                    'Horas Feriado Nocturnas': self.hours_to_excel_time(d.get('holiday_night_hours', 0.0)),
+                    #'Es Franco': 'Sí' if d.get('is_rest_day') else 'No',
+                    #'Es Feriado': 'Sí' if d.get('is_holiday') else 'No',
+                    #'Nombre Feriado': d.get('holiday_name') or '',
+                    #'Tiene Licencia': 'Sí' if d.get('has_time_off') else 'No',
+                    #'Tipo Licencia': d.get('time_off_name') or '',
+                    'Tardanza': self.hours_to_excel_time(d.get('tardanza_horas', 0.0)),
+                    'Retiro Anticipado': self.hours_to_excel_time(d.get('retiro_anticipado_horas', 0.0)),
+                }
+                daily_rows.append(row)
+
+        return daily_rows
+
+    # -------------------- Formato de hojas --------------------
+    def _format_summary_sheet(self, writer, df, start_date, end_date):
+        workbook = writer.book
+        worksheet = writer.sheets['Resumen Consolidado']
+
+        # Formato numérico según config
+        num_format = '0.00' if self.usar_decimales else 'hh:mm'
+
+        header_format = workbook.add_format({
+            'bold': True, 'font_color': 'white', 'bg_color': '#366092',
+            'border': 1, 'align': 'center', 'valign': 'vcenter'
+        })
+        title_format = workbook.add_format({'bold': True, 'font_size': 12})
+        time_format = workbook.add_format({'num_format': num_format})
+
+        regular_format = workbook.add_format({'bg_color': '#D4EDDA', 'border': 1, 'num_format': num_format})
+        extra_50_format = workbook.add_format({'bg_color': '#FFF3CD', 'border': 1, 'num_format': num_format})
+        extra_100_format = workbook.add_format({'bg_color': '#F8D7DA', 'border': 1, 'num_format': num_format})
+        night_format = workbook.add_format({'bg_color': '#D1ECF1', 'border': 1, 'num_format': num_format})
+        holiday_format = workbook.add_format({'bg_color': '#D6EAF8', 'border': 1, 'num_format': num_format})
+
+        worksheet.write(0, 0, "REPORTE DE ASISTENCIA - RESUMEN CONSOLIDADO", title_format)
+        worksheet.write(1, 0, f"Período: {start_date} al {end_date}", title_format)
+        worksheet.write(2, 0, f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}", title_format)
+
+        time_cols = {
+            'Total Horas', 'Horas Regulares', 'Horas Extra 50%', 'Horas Extra 100%',
+            'Horas Nocturnas', 'Horas Feriado', 'Horas Feriado Nocturnas',
+            'Total Tardanzas', 'Total Retiros Anticipados',
+            'Horas Extra Diurnas', 'Horas Extra Nocturnas',
+            'Horas Extra 50% Nocturnas', 'Horas Extra 100% Nocturnas'
+        }
+
+        for col_num, col_name in enumerate(df.columns):
+            worksheet.write(3, col_num, col_name, header_format)
+            if col_name in time_cols:
+                if col_name == 'Horas Regulares':
+                    worksheet.set_column(col_num, col_num, 16, regular_format)
+                elif col_name == 'Horas Extra 50%':
+                    worksheet.set_column(col_num, col_num, 16, extra_50_format)
+                elif col_name == 'Horas Extra 100%':
+                    worksheet.set_column(col_num, col_num, 16, extra_100_format)
+                elif col_name in ['Horas Nocturnas', 'Horas Extra Nocturnas']:
+                    worksheet.set_column(col_num, col_num, 16, night_format)
+                elif col_name in ['Horas Feriado', 'Horas Feriado Nocturnas']:
+                    worksheet.set_column(col_num, col_num, 16, holiday_format)
+                else:
+                    worksheet.set_column(col_num, col_num, 16, time_format)
+            else:
+                worksheet.set_column(col_num, col_num, 18)
+
+    def _format_daily_sheet(self, writer, df, start_date, end_date):
+        workbook = writer.book
+        worksheet = writer.sheets['Detalle Diario']
+
+        # Formato numérico según config
+        num_format = '0.00' if self.usar_decimales else 'hh:mm'
+
+        title_format = workbook.add_format({'bold': True, 'font_size': 12})
+        header_format = workbook.add_format({
+            'bold': True, 'font_color': 'white', 'bg_color': '#366092',
+            'border': 1, 'align': 'center', 'valign': 'vcenter'
+        })
+        time_format = workbook.add_format({'num_format': num_format})
+
+        worksheet.write(0, 0, "DETALLE DIARIO DE ASISTENCIA", title_format)
+        worksheet.write(1, 0, f"Período: {start_date} al {end_date}", title_format)
+        worksheet.write(2, 0, f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}", title_format)
+
+        time_cols = {
+            'Horas Trabajadas', 'Horas Regulares', 'Horas Extra 50%',
+            'Horas Extra 100%', 'Horas Nocturnas', 'Horas Feriado',
+            'Horas Feriado Nocturnas', 'Horas extra', 'Tardanza', 'Retiro Anticipado',
+            'Horas Extra Diurnas', 'Horas Extra Nocturnas',
+            'Horas Extra 50% Nocturnas', 'Horas Extra 100% Nocturnas'
+        }
+
+        for col_num, col_name in enumerate(df.columns):
+            worksheet.write(3, col_num, col_name, header_format)
+            if col_name in time_cols:
+                worksheet.set_column(col_num, col_num, 12, time_format)
+            elif col_name in ['Fecha', 'Nombre Feriado', 'Observaciones']: 
+                worksheet.set_column(col_num, col_num, 20)
+            elif col_name in ['Apellido, Nombre']:
+                worksheet.set_column(col_num, col_num, 28)
+            else:
+                worksheet.set_column(col_num, col_num, 14)
+
